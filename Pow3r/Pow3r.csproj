@@ -1,5 +1,6 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
+        <CETCompat>false</CETCompat>
         <OutputType>Exe</OutputType>
         <TargetFramework>$(TargetFramework)</TargetFramework>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

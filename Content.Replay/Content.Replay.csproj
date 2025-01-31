@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <CETCompat>false</CETCompat>
     <TargetFramework>$(TargetFramework)</TargetFramework>
     <LangVersion>12</LangVersion>
     <IsPackable>false</IsPackable>
