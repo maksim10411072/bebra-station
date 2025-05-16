@@ -10,6 +10,7 @@ using Content.Shared.Body.Part;
 using Content.Shared.CombatMode;
 using Content.Shared.Damage.Systems;
 using Content.Shared.Explosion;
+using Content.Shared.Hands;
 using Content.Shared.Hands.Components;
 using Content.Shared.Hands.EntitySystems;
 using Content.Shared.Input;
@@ -18,10 +19,12 @@ using Content.Shared.Movement.Pulling.Components;
 using Content.Shared.Movement.Pulling.Events;
 using Content.Shared.Movement.Pulling.Systems;
 using Content.Shared.Stacks;
+using Content.Shared.Standing;
 using Content.Shared.Throwing;
 using Robust.Shared.GameStates;
 using Robust.Shared.Input.Binding;
 using Robust.Shared.Map;
+using Robust.Shared.Physics.Components;
 using Robust.Shared.Player;
 using Robust.Shared.Random;
 using Robust.Shared.Timing;
@@ -40,6 +43,16 @@ namespace Content.Server.Hands.Systems
         [Dependency] private readonly PullingSystem _pullingSystem = default!;
         [Dependency] private readonly ThrowingSystem _throwingSystem = default!;
         [Dependency] private readonly SharedBodySystem _bodySystem = default!;
+
+        private EntityQuery<PhysicsComponent> _physicsQuery;
+
+        /// <summary>
+        /// Items dropped when the holder falls down will be launched in
+        /// a direction offset by up to this many degrees from the holder's
+        /// movement direction.
+        /// </summary>
+        private const float DropHeldItemsSpread = 45;
+
         public override void Initialize()
         {
             base.Initialize();
@@ -58,9 +71,13 @@ namespace Content.Server.Hands.Systems
             SubscribeLocalEvent<HandsComponent, BodyPartEnabledEvent>(HandleBodyPartEnabled); // CorvaxNext: surgery
             SubscribeLocalEvent<HandsComponent, BodyPartDisabledEvent>(HandleBodyPartDisabled); // CorvaxNext: surgery
 
+            SubscribeLocalEvent<HandsComponent, DropHandItemsEvent>(OnDropHandItems);
+
             CommandBinds.Builder
                 .Bind(ContentKeyFunctions.ThrowItemInHand, new PointerInputCmdHandler(HandleThrowItem))
                 .Register<HandsSystem>();
+
+            _physicsQuery = GetEntityQuery<PhysicsComponent>();
         }
 
         public override void Shutdown()
@@ -95,7 +112,7 @@ namespace Content.Server.Hands.Systems
 
             // Break any pulls
             if (TryComp(uid, out PullerComponent? puller) && TryComp(puller.Pulling, out PullableComponent? pullable))
-                _pullingSystem.TryStopPull(puller.Pulling.Value, pullable);
+                _pullingSystem.TryStopPull(puller.Pulling.Value, pullable, ignoreGrab: true); // Goobstation edit added check for grab
 
             var offsetRandomCoordinates = _transformSystem.GetMoverCoordinates(args.Target).Offset(_random.NextVector2(1f, 1.5f));
             if (!ThrowHeldItem(args.Target, offsetRandomCoordinates))
@@ -206,6 +223,20 @@ namespace Content.Server.Hands.Systems
             if (playerSession?.AttachedEntity is not {Valid: true} player || !Exists(player) || !coordinates.IsValid(EntityManager))
                 return false;
 
+            // Goobstation start
+            if (TryGetActiveItem(player, out var item) && TryComp<VirtualItemComponent>(item, out var virtComp))
+            {
+                var userEv = new VirtualItemDropAttemptEvent(virtComp.BlockingEntity, player, item.Value, true);
+                RaiseLocalEvent(player, userEv);
+
+                var targEv = new VirtualItemDropAttemptEvent(virtComp.BlockingEntity, player, item.Value, true);
+                RaiseLocalEvent(virtComp.BlockingEntity, targEv);
+
+                if (userEv.Cancelled || targEv.Cancelled)
+                    return false;
+            }
+            // Goobstation end
+
             return ThrowHeldItem(player, coordinates);
         }
 
@@ -219,6 +250,18 @@ namespace Content.Server.Hands.Systems
                 hands.ActiveHandEntity is not { } throwEnt ||
                 !_actionBlockerSystem.CanThrow(player, throwEnt))
                 return false;
+            // Goobstation start added throwing for grabbed mobs, mnoved direction.
+            var direction = _transformSystem.ToMapCoordinates(coordinates).Position - _transformSystem.GetWorldPosition(player);
+
+            if (TryComp<VirtualItemComponent>(throwEnt, out var virt))
+            {
+                var userEv = new VirtualItemThrownEvent(virt.BlockingEntity, player, throwEnt, direction);
+                RaiseLocalEvent(player, userEv);
+
+                var targEv = new VirtualItemThrownEvent(virt.BlockingEntity, player, throwEnt, direction);
+                RaiseLocalEvent(virt.BlockingEntity, targEv);
+            }
+            // Goobstation end
 
             if (_timing.CurTime < hands.NextThrowTime)
                 return false;
@@ -234,7 +277,6 @@ namespace Content.Server.Hands.Systems
                 throwEnt = splitStack.Value;
             }
 
-            var direction = _transformSystem.ToMapCoordinates(coordinates).Position - _transformSystem.GetWorldPosition(player);
             if (direction == Vector2.Zero)
                 return true;
 
@@ -259,6 +301,52 @@ namespace Content.Server.Hands.Systems
             _throwingSystem.TryThrow(ev.ItemUid, ev.Direction, ev.ThrowSpeed, ev.PlayerUid, compensateFriction: !HasComp<LandAtCursorComponent>(ev.ItemUid));
 
             return true;
+        }
+
+        private void OnDropHandItems(Entity<HandsComponent> entity, ref DropHandItemsEvent args)
+        {
+            // If the holder doesn't have a physics component, they ain't moving
+            var holderVelocity = _physicsQuery.TryComp(entity, out var physics) ? physics.LinearVelocity : Vector2.Zero;
+            var spreadMaxAngle = Angle.FromDegrees(DropHeldItemsSpread);
+
+            var fellEvent = new FellDownEvent(entity);
+            RaiseLocalEvent(entity, fellEvent, false);
+
+            foreach (var hand in entity.Comp.Hands.Values)
+            {
+                if (hand.HeldEntity is not EntityUid held)
+                    continue;
+
+                var throwAttempt = new FellDownThrowAttemptEvent(entity);
+                RaiseLocalEvent(hand.HeldEntity.Value, ref throwAttempt);
+
+                if (throwAttempt.Cancelled)
+                    continue;
+
+                if (!TryDrop(entity, hand, null, checkActionBlocker: false, handsComp: entity.Comp))
+                    continue;
+
+                // Rotate the item's throw vector a bit for each item
+                var angleOffset = _random.NextAngle(-spreadMaxAngle, spreadMaxAngle);
+                // Rotate the holder's velocity vector by the angle offset to get the item's velocity vector
+                var itemVelocity = angleOffset.RotateVec(holderVelocity);
+                // Decrease the distance of the throw by a random amount
+                itemVelocity *= _random.NextFloat(1f);
+                // Heavier objects don't get thrown as far
+                // If the item doesn't have a physics component, it isn't going to get thrown anyway, but we'll assume infinite mass
+                itemVelocity *= _physicsQuery.TryComp(held, out var heldPhysics) ? heldPhysics.InvMass : 0;
+                // Throw at half the holder's intentional throw speed and
+                // vary the speed a little to make it look more interesting
+                var throwSpeed = entity.Comp.BaseThrowspeed * _random.NextFloat(0.45f, 0.55f);
+
+                _throwingSystem.TryThrow(held,
+                    itemVelocity,
+                    throwSpeed,
+                    entity,
+                    pushbackRatio: 0,
+                    compensateFriction: false
+                );
+            }
         }
 
         #endregion

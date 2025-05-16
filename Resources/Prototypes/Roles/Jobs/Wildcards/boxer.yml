@@ -9,6 +9,13 @@
   access:
   - Service
   - Maintenance
+  special:
+  - !type:GiveItemOnHolidaySpecial
+    holiday: BoxingDay
+    prototype: ClothingHandsGlovesBoxingRigged
+  - !type:AddComponentSpecial
+    components:
+      - type: CanChokeGrab
 
 - type: startingGear
   id: BoxerGear

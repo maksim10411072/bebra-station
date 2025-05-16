@@ -1,6 +1,6 @@
 - type: gameMap
   id: NextPearl
-  mapName: 'Next Pearl'
+  mapName: 'NTSR Пёрл'
   mapPath: /Maps/Next/next_pearl.yml
   maxRandomOffset: 0
   randomRotation: false
@@ -86,5 +86,10 @@
           - CellAI
           - Botany
           - Bunker
-          - Survive
           - BluespaceHarvest
+        # Corvax-next blob-config-start SMALL+
+        - type: StationBlobConfig
+          stageBegin: 40
+          stageCritical: 500
+          stageTheEnd: 900
+        # Corvax-next blob-config-end
